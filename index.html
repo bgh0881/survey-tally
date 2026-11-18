@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>10x10 삼목</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4efe4; --text: #2a241b; --muted: #6b6254;
+    --board: #dcb57a; --grid: #8a6a3c; --board-edge: #b8915a;
+    --black: #1b1b1b; --white: #fbfbf8; --stone-edge: #555;
+    --win: #d8432f; --focus: #2f5bd3;
+    --btn: #fffaf0; --btn-line: #c9bda6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17150f; --text: #ece6d8; --muted: #a59c8b;
+      --board: #a9824b; --grid: #5c4422; --board-edge: #7e5f33;
+      --stone-edge: #222;
+      --win: #ff7a63; --focus: #8fb0ff;
+      --btn: #26221a; --btn-line: #4a4334;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    line-height: 1.5;
+  }
+  main { max-width: 520px; margin: 0 auto; padding: 20px 16px 40px; }
+  h1 { font-size: 1.5rem; margin: 0 0 2px; }
+  .rules { color: var(--muted); font-size: 0.92rem; margin: 0 0 14px; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .status { display: flex; align-items: center; gap: 8px; font-weight: 600; min-height: 1.5em; }
+  .status .stone { width: 18px; height: 18px; position: static; flex: none; }
+  .actions { display: flex; gap: 8px; }
+  button.action {
+    font: inherit; font-size: 0.95rem; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--btn-line); background: var(--btn); color: var(--text);
+  }
+  button.action:disabled { opacity: 0.45; cursor: default; }
+  .board {
+    display: grid; grid-template-columns: repeat(10, 1fr);
+    width: 100%; aspect-ratio: 1; padding: 2%;
+    background: var(--board); border: 2px solid var(--board-edge); border-radius: 6px;
+    touch-action: manipulation; user-select: none;
+  }
+  .cell {
+    position: relative; margin: 0; padding: 0; border: 0; background: transparent;
+    cursor: pointer; aspect-ratio: 1; -webkit-tap-highlight-color: transparent;
+  }
+  /* 칸 가운데를 지나는 격자선: 돌은 교차점에 놓인다 */
+  .cell::before, .cell::after { content: ""; position: absolute; background: var(--grid); pointer-events: none; }
+  .cell::before { left: 0; right: 0; top: 50%; height: 1px; }
+  .cell::after { top: 0; bottom: 0; left: 50%; width: 1px; }
+  .cell[data-c="0"]::before { left: 50%; }
+  .cell[data-c="9"]::before { right: 50%; }
+  .cell[data-r="0"]::after { top: 50%; }
+  .cell[data-r="9"]::after { bottom: 50%; }
+  .board [role="row"] { display: contents; }
+  .cell[aria-disabled="true"] { cursor: default; }
+  .cell:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 4px; z-index: 2; }
+  .stone {
+    position: absolute; inset: 9%; border-radius: 50%; z-index: 1;
+    border: 1px solid var(--stone-edge);
+  }
+  .stone.B { background: radial-gradient(circle at 35% 30%, #555 0, var(--black) 60%); }
+  .stone.W { background: radial-gradient(circle at 35% 30%, #fff 0, var(--white) 55%, #d9d6cc 100%); }
+  .cell.preview .stone { visibility: hidden; }
+  @media (hover: hover) {
+    .cell.preview:not([aria-disabled="true"]):hover .stone { visibility: visible; opacity: 0.35; }
+  }
+  .cell.last .stone::after {
+    content: ""; position: absolute; inset: 36%; border-radius: 50%; background: var(--win);
+  }
+  .cell.win .stone { box-shadow: 0 0 0 3px var(--win); }
+  .hint { color: var(--muted); font-size: 0.85rem; margin: 10px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>10x10 삼목</h1>
+  <p class="rules">흑과 백이 번갈아 돌을 놓습니다. 가로·세로·대각선으로 같은 색 3개를 먼저 잇는 쪽이 이깁니다.</p>
+
+  <div class="bar">
+    <div class="status" id="status" aria-live="polite"></div>
+    <div class="actions">
+      <button type="button" class="action" id="undo">무르기</button>
+      <button type="button" class="action" id="restart">새 게임</button>
+    </div>
+  </div>
+
+  <div class="board" id="board" role="grid" aria-label="10x10 바둑판"></div>
+  <p class="hint">한 기기에서 두 사람이 번갈아 둡니다. 키보드: 방향키로 이동, Enter·Space로 착수.</p>
+</main>
+
+<script id="game-core">
+/* 게임 규칙: 화면(DOM)을 건드리지 않는 순수 함수만 둔다. tests/에서 이 스크립트를 그대로 뽑아 시험한다.
+   게임 상태는 바꾸지 않고, 수를 둘 때마다 새 상태를 돌려준다. */
+(function (root) {
+  'use strict';
+
+  var SIZE = 10;
+  var WIN_LENGTH = 3;
+  var DIRECTIONS = [[0, 1], [1, 0], [1, 1], [1, -1]]; // 가로, 세로, ↘ 대각선, ↙ 대각선
+
+  function other(player) { return player === 'B' ? 'W' : 'B'; }
+
+  function newGame() {
+    var board = [];
+    for (var i = 0; i < SIZE * SIZE; i += 1) board.push(null);
+    return { board: board, turn: 'B', winner: null, line: [], moves: [] };
+  }
+
+  function inside(r, c) { return r >= 0 && r < SIZE && c >= 0 && c < SIZE; }
+
+  // (r, c)에 놓인 돌을 지나며 같은 색이 WIN_LENGTH개 이상 이어진 줄을 찾는다. 없으면 [].
+  // 줄은 판 안에서만 잇는다(한 줄 끝에서 다음 줄 처음으로 넘어가지 않는다).
+  function findLine(board, r, c) {
+    var player = board[r * SIZE + c];
+    if (!player) return [];
+    for (var d = 0; d < DIRECTIONS.length; d += 1) {
+      var dr = DIRECTIONS[d][0];
+      var dc = DIRECTIONS[d][1];
+      var cells = [r * SIZE + c];
+      for (var sign = -1; sign <= 1; sign += 2) {
+        var rr = r + sign * dr;
+        var cc = c + sign * dc;
+        while (inside(rr, cc) && board[rr * SIZE + cc] === player) {
+          if (sign < 0) cells.unshift(rr * SIZE + cc); else cells.push(rr * SIZE + cc);
+          rr += sign * dr;
+          cc += sign * dc;
+        }
+      }
+      if (cells.length >= WIN_LENGTH) return cells;
+    }
+    return [];
+  }
+
+  function canPlay(game, r, c) {
+    return !game.winner && Number.isInteger(r) && Number.isInteger(c) && inside(r, c) &&
+      game.board[r * SIZE + c] === null;
+  }
+
+  // (r, c)에 지금 차례인 돌을 놓은 새 상태. 둘 수 없는 자리면 원래 상태를 그대로 돌려준다.
+  function play(game, r, c) {
+    if (!canPlay(game, r, c)) return game;
+    var index = r * SIZE + c;
+    var board = game.board.slice();
+    board[index] = game.turn;
+    var moves = game.moves.concat([index]);
+    var line = findLine(board, r, c);
+    var winner = null;
+    if (line.length) winner = game.turn;
+    else if (moves.length === SIZE * SIZE) winner = 'draw';
+    return { board: board, turn: winner ? game.turn : other(game.turn), winner: winner, line: line, moves: moves };
+  }
+
+  // 마지막 한 수를 무른 상태. 둔 수가 없으면 그대로.
+  function undo(game) {
+    if (game.moves.length === 0) return game;
+    var g = newGame();
+    for (var i = 0; i < game.moves.length - 1; i += 1) {
+      var m = game.moves[i];
+      g = play(g, Math.floor(m / SIZE), m % SIZE);
+    }
+    return g;
+  }
+
+  var api = { SIZE: SIZE, WIN_LENGTH: WIN_LENGTH, newGame: newGame, canPlay: canPlay, play: play, undo: undo, findLine: findLine };
+  if (typeof module === 'object' && module && module.exports) module.exports = api;
+  else root.Samok = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+
+<script id="game-ui">
+/* 화면: 판을 그리고 클릭·키보드 입력을 Samok.play로 넘긴다. */
+(function () {
+  'use strict';
+  var SIZE = Samok.SIZE;
+  var NAMES = { B: '흑', W: '백' };
+  var boardEl = document.getElementById('board');
+  var statusEl = document.getElementById('status');
+  var undoBtn = document.getElementById('undo');
+  var game = Samok.newGame();
+  var focusIndex = Math.floor(SIZE / 2) * SIZE + Math.floor(SIZE / 2) - 1;
+  var cells = [];
+
+  for (var r = 0; r < SIZE; r += 1) {
+    var row = document.createElement('div');
+    row.setAttribute('role', 'row');
+    for (var c = 0; c < SIZE; c += 1) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cell';
+      btn.dataset.r = r;
+      btn.dataset.c = c;
+      btn.setAttribute('role', 'gridcell');
+      btn.appendChild(document.createElement('span'));
+      row.appendChild(btn);
+      cells.push(btn);
+    }
+    boardEl.appendChild(row);
+  }
+
+  function stoneDot(player) {
+    var s = document.createElement('span');
+    s.className = 'stone ' + player;
+    s.setAttribute('aria-hidden', 'true');
+    return s;
+  }
+
+  function render() {
+    var last = game.moves.length ? game.moves[game.moves.length - 1] : -1;
+    var wins = {};
+    game.line.forEach(function (i) { wins[i] = true; });
+
+    cells.forEach(function (btn, i) {
+      var owner = game.board[i];
+      var shown = owner || (game.winner ? null : game.turn);
+      var stone = btn.firstChild;
+      stone.className = shown ? 'stone ' + shown : '';
+      btn.classList.toggle('preview', !owner);
+      btn.classList.toggle('last', i === last);
+      btn.classList.toggle('win', !!wins[i]);
+      btn.setAttribute('aria-disabled', owner || game.winner ? 'true' : 'false');
+      btn.tabIndex = i === focusIndex ? 0 : -1;
+      var where = (Math.floor(i / SIZE) + 1) + '행 ' + (i % SIZE + 1) + '열';
+      btn.setAttribute('aria-label', where + ', ' + (owner ? NAMES[owner] + '돌' : '빈 자리'));
+    });
+
+    statusEl.textContent = '';
+    if (game.winner === 'draw') {
+      statusEl.textContent = '무승부입니다. 판이 가득 찼습니다.';
+    } else if (game.winner) {
+      statusEl.appendChild(stoneDot(game.winner));
+      statusEl.appendChild(document.createTextNode(NAMES[game.winner] + ' 승리!'));
+    } else {
+      statusEl.appendChild(stoneDot(game.turn));
+      statusEl.appendChild(document.createTextNode(NAMES[game.turn] + ' 차례 (' + (game.moves.length + 1) + '수)'));
+    }
+    undoBtn.disabled = game.moves.length === 0;
+  }
+
+  // 둘 수 없는 칸도 키보드로 지나갈 수 있게 disabled는 쓰지 않는다. 둘 수 없는 클릭은 Samok.play가 무시한다.
+  boardEl.addEventListener('click', function (e) {
+    var btn = e.target.closest('.cell');
+    if (!btn) return;
+    var i = cells.indexOf(btn);
+    focusIndex = i;
+    game = Samok.play(game, Math.floor(i / SIZE), i % SIZE);
+    render();
+    cells[focusIndex].focus();
+  });
+
+  boardEl.addEventListener('keydown', function (e) {
+    var moves = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
+    var mv = moves[e.key];
+    if (!mv) return;
+    e.preventDefault();
+    var r = Math.min(SIZE - 1, Math.max(0, Math.floor(focusIndex / SIZE) + mv[0]));
+    var c = Math.min(SIZE - 1, Math.max(0, focusIndex % SIZE + mv[1]));
+    focusIndex = r * SIZE + c;
+    render();
+    cells[focusIndex].focus();
+  });
+
+  undoBtn.addEventListener('click', function () { game = Samok.undo(game); render(); });
+  document.getElementById('restart').addEventListener('click', function () { game = Samok.newGame(); render(); });
+
+  render();
+})();
+</script>
+</body>
+</html>
